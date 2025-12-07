@@ -2,6 +2,9 @@
 from fastapi import FastAPI, Query, Response, Body, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, List, Set, Optional, Tuple
+from fastapi import UploadFile, File # UploadFile, File 추가
+# 뒤에 ', get_whisper_model' 을 꼭 붙여야 합니다!
+from app.ktas_engine import ktas_from_audio, build_stage2_payload, get_whisper_model
 
 from app.state_assignments import pending_assignments
 
@@ -248,6 +251,11 @@ app.add_middleware(
 # 전역 클라이언트 인스턴스
 ermct_client = ErmctClient()
 
+@app.on_event("startup")
+async def startup_event():
+    print(" [Startup] Whisper AI 모델 로딩 시작...")
+    get_whisper_model()
+    print(" [Startup] Whisper AI 모델 로딩 완료!")
 
 @app.get("/health")
 def health_check():
@@ -1420,3 +1428,45 @@ async def route_seoul_nearest(
         user_lon=req.user_lon,
         hospitals=top3_hospitals,
     )
+
+
+# 파일 맨 끝에 붙여넣으세요
+
+@app.post("/api/ktas/predict-audio", response_model=RoutingCandidateResponse)
+async def predict_audio(audio: UploadFile = File(...)):
+    """
+    [Stage 1 + Stage 2 통합]
+    """
+    # 1. [Stage 1] 음성 엔진 실행
+    print("\n[Stage 1] 음성 분석 및 KTAS 분류 중...")
+    stage1_result = ktas_from_audio(audio.file)
+
+    # 2. 데이터 변환
+    payload_dict = build_stage2_payload(stage1_result)
+    req_obj = KTASRoutingRequest(**payload_dict)
+
+    # 3. [Stage 2] 병원 추천 로직 실행 (변수에 담기!)
+    print("[Stage 2] 병원 필터링 및 순위 선정 중...")
+    
+    # ★ 여기서 바로 return 하지 말고, 변수(final_response)에 저장합니다.
+    final_response = route_from_ktas_seoul(req_obj) 
+
+    # ====================================================
+    # ★ 터미널 출력용 코드 (여기서 확인!)
+    # ====================================================
+    print("\n" + "="*60)
+    print(f" 🚑 [최종 추천 결과] 총 {len(final_response.hospitals)}개 병원 발견")
+    print("="*60)
+
+    # 상위 3개 병원만 터미널에 찍어보기
+    for i, hosp in enumerate(final_response.hospitals[:3]):
+        print(f" {i+1}순위: {hosp.name}")
+        print(f"    - 병상수: {hosp.total_effective_beds}개")
+        print(f"    - 추천사유: {hosp.reason_summary}")
+        print("-" * 40)
+    
+    print("="*60 + "\n")
+    # ====================================================
+
+    # 4. 최종 리턴
+    return final_response
